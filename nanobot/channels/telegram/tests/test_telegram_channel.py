@@ -26,7 +26,7 @@ from nanobot.channels.telegram.runtime import (
     _split_telegram_markdown,
     _StreamBuf,
 )
-from nanobot.events import ContextCompactionEvent
+from nanobot.events import ContextCompactionEvent, FollowUpEvent
 
 
 class _FakeHTTPXRequest:
@@ -3274,3 +3274,55 @@ async def test_compaction_notices_are_tracked_per_compaction_id() -> None:
         chat_id=999, message_id=101, text="Context compacted.",
     )
     assert channel._compaction_notices == {("999", "c2"): 202}
+
+
+# ---------------------------------------------------------------------------
+# Follow-up lifecycle reactions: queued -> processing -> done
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_followup_events_flip_reactions() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    _install_ready_app(channel)
+    channel._app.bot.set_message_reaction = AsyncMock()
+
+    for phase in ("queued", "processing", "done"):
+        await channel.send(OutboundMessage(
+            channel="telegram",
+            chat_id="999",
+            content="",
+            event=FollowUpEvent(phase=phase, message_id="55"),
+        ))
+
+    reactions = [
+        (call.kwargs["message_id"], call.kwargs["reaction"][0].emoji)
+        for call in channel._app.bot.set_message_reaction.await_args_list
+    ]
+    assert reactions == [(55, "🤔"), (55, "👨‍💻"), (55, "👍")]
+
+
+@pytest.mark.asyncio
+async def test_final_response_marks_done_reaction_on_replied_message() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    _install_ready_app(channel)
+    channel._app.bot.set_message_reaction = AsyncMock()
+    channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="999",
+        content="answer",
+        metadata={"message_id": "77"},
+    ))
+
+    reactions = [
+        (call.kwargs["message_id"], call.kwargs["reaction"][0].emoji)
+        for call in channel._app.bot.set_message_reaction.await_args_list
+    ]
+    assert reactions == [(77, "👍")]

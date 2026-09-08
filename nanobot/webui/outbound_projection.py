@@ -20,6 +20,7 @@ from nanobot.bus.outbound_events import (
     TurnModelUpdatedEvent,
     UserInputEvent,
 )
+from nanobot.events import FollowUpEvent
 from nanobot.session.webui_turns import clear_websocket_turn_if_current
 from nanobot.webui.metadata import (
     WEBSOCKET_TURN_OWNER_METADATA_KEY,
@@ -137,6 +138,10 @@ class WebUIOutboundProjector:
     async def send(self, msg: OutboundMessage) -> None:
         event = msg.event
         if isinstance(event, RetryWaitEvent):
+            return
+        if isinstance(event, FollowUpEvent):
+            # Reaction-only lifecycle: the WebUI shows queued state through the
+            # conversation itself, so there is nothing to project onto the wire.
             return
         progress_event = event if isinstance(event, ProgressEvent) else None
         if isinstance(event, RuntimeModelUpdatedEvent):

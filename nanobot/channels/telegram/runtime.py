@@ -36,7 +36,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import build_help_text
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
-from nanobot.events import ContextCompactionEvent
+from nanobot.events import ContextCompactionEvent, FollowUpEvent
 from nanobot.security.network import validate_url_target
 from nanobot.utils.helpers import split_message
 from nanobot.utils.logging_bridge import redirect_lib_logging
@@ -420,6 +420,12 @@ class TelegramConfig(Base):
     proxy: str | None = None
     reply_to_message: bool = False
     react_emoji: str = "👀"
+    # Follow-up lifecycle reactions. Values must come from Telegram's allowed
+    # reaction emoji set; empty string disables a phase (done falls back to
+    # removing the reaction).
+    queued_react_emoji: str = "🤔"
+    processing_react_emoji: str = "👨‍💻"
+    done_react_emoji: str = "👍"
     group_policy: Literal["open", "mention"] = "mention"
     connection_pool_size: int = 32
     pool_timeout: float = 5.0
@@ -1030,12 +1036,19 @@ class TelegramChannel(BaseChannel):
 
         progress_event = msg.event if isinstance(msg.event, ProgressEvent) else None
 
+        # Follow-up lifecycle updates only flip reactions; the owning turn
+        # keeps typing its indicator, so no typing or reply cleanup happens.
+        followup_event = msg.event if isinstance(msg.event, FollowUpEvent) else None
+        if followup_event is not None:
+            await self._apply_followup_reaction(msg, followup_event)
+            return
+
         # Only stop typing indicator and remove reaction for final responses
         if progress_event is None:
             self._stop_typing(msg.chat_id)
             if reply_to_message_id := msg.metadata.get("message_id"):
                 with suppress(ValueError):
-                    await self._remove_reaction(msg.chat_id, int(reply_to_message_id))
+                    await self._mark_done_reaction(msg.chat_id, int(reply_to_message_id))
 
         try:
             chat_id = int(msg.chat_id)
@@ -1307,7 +1320,7 @@ class TelegramChannel(BaseChannel):
             self._stop_typing(chat_id)
             if reply_to_message_id := meta.get("message_id"):
                 with suppress(ValueError):
-                    await self._remove_reaction(chat_id, int(reply_to_message_id))
+                    await self._mark_done_reaction(chat_id, int(reply_to_message_id))
             thread_kwargs: dict[str, int] = {}
             if message_thread_id := meta.get("message_thread_id"):
                 thread_kwargs["message_thread_id"] = message_thread_id
@@ -2064,6 +2077,26 @@ class TelegramChannel(BaseChannel):
             )
         except Exception as e:
             self.logger.debug("reaction removal failed: {}", e)
+
+    async def _mark_done_reaction(self, chat_id: str, message_id: int) -> None:
+        """Flip the acknowledgment reaction on the user's message to done."""
+        if self.config.done_react_emoji:
+            await self._add_reaction(chat_id, message_id, self.config.done_react_emoji)
+        else:
+            await self._remove_reaction(chat_id, message_id)
+
+    async def _apply_followup_reaction(self, msg: OutboundMessage, event: FollowUpEvent) -> None:
+        """Reflect a follow-up lifecycle phase as a reaction on the user's message."""
+        emoji = {
+            "queued": self.config.queued_react_emoji,
+            "processing": self.config.processing_react_emoji,
+            "done": self.config.done_react_emoji,
+        }.get(event.phase, "")
+        target = event.message_id or msg.metadata.get("message_id")
+        if not emoji or target is None:
+            return
+        with suppress(ValueError):
+            await self._add_reaction(str(msg.chat_id), int(target), emoji)
 
     async def _typing_loop(self, chat_id: str) -> None:
         """Repeatedly send 'typing' action until cancelled."""

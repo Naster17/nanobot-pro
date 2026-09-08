@@ -9,7 +9,13 @@ from nanobot.bus.outbound_events import (
     StreamDeltaEvent,
     StreamEndEvent,
 )
-from nanobot.events import AgentEvent, ContextCompactionEvent, RecoveryStateEvent, RetryWaitEvent
+from nanobot.events import (
+    AgentEvent,
+    ContextCompactionEvent,
+    FollowUpEvent,
+    RecoveryStateEvent,
+    RetryWaitEvent,
+)
 
 NotificationAudience = Literal["channel", "lifecycle", "interactive"]
 
@@ -19,6 +25,7 @@ NOTIFICATION_AUDIENCES: dict[type[AgentEvent], NotificationAudience] = {
     StreamDeltaEvent: "channel",
     StreamEndEvent: "channel",
     ContextCompactionEvent: "channel",
+    FollowUpEvent: "channel",
     RetryWaitEvent: "lifecycle",
     RecoveryStateEvent: "interactive",
     RetryStatusEvent: "interactive",

@@ -20,6 +20,20 @@ class ContextCompactionEvent(AgentEvent):
 
 
 @dataclass(frozen=True)
+class FollowUpEvent(AgentEvent):
+    """Reaction-level lifecycle of a message diverted into an active turn.
+
+    ``queued`` when the message joins an active turn's injection queue,
+    ``processing`` when it is injected into the model context, ``done`` when
+    the turn that consumed it completed. Carries the originating chat message
+    id so reaction-capable channels can update their acknowledgment emoji.
+    """
+
+    phase: Literal["queued", "processing", "done"]
+    message_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RetryWaitEvent(AgentEvent):
     content: str = ""
 

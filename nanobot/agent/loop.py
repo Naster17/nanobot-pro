@@ -58,7 +58,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.command.router import normalize_command_text
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
-from nanobot.events import NO_EVENTS, AgentEvent, EventSink
+from nanobot.events import NO_EVENTS, AgentEvent, EventSink, FollowUpEvent
 from nanobot.llm_usage.context import source_from_request
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
@@ -125,6 +125,8 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
 _SUBAGENT_TERMINAL_WAIT_SECONDS = 300.0
+# Mid-turn injection queue bound per session (see ``_pending_queues``).
+_PENDING_QUEUE_MAXSIZE = 20
 
 
 class TurnKind(Enum):
@@ -874,10 +876,33 @@ class AgentLoop:
         if not tasks and self._active_tasks.get(key) is tasks:
             self._active_tasks.pop(key, None)
 
+    async def _abandon_dispatch_queue(self, session_key: str) -> None:
+        """Release a dispatch's claim on its pre-registered queue, reparking it.
+
+        Called when a dispatch exits before owning the session lock (stale
+        recovery, cancellation while waiting for the lock). Diverted
+        follow-ups are re-published to the bus so they are not lost, unless
+        another tracked task still owns the session.
+        """
+        tracked = self._active_tasks.get(session_key)
+        current = asyncio.current_task()
+        if tracked and not tracked <= {current}:
+            return
+        queue = self._pending_queues.pop(session_key, None)
+        if queue is None:
+            return
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await self.bus.publish_inbound(item)
+
     async def _cancel_active_tasks(self, key: str) -> int:
         """Cancel and await all active work for *key*.
 
-        Returns the total number of cancelled tasks, subagents, and exec sessions.
+        Returns the total number of cancelled tasks, subagents, exec sessions,
+        and parked follow-up messages.
         """
         tasks = tuple(self._active_tasks.pop(key, set()))
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
@@ -886,7 +911,18 @@ class AgentLoop:
                 await t
         sub_cancelled = await self.subagents.cancel_by_session(key)
         exec_cancelled = await self._exec_session_manager.terminate_by_owner(key)
-        return cancelled + sub_cancelled + exec_cancelled
+        # A task cancelled before its coroutine first ran never reaches its own
+        # queue cleanup; drop any parked follow-up queue together with it.
+        dropped = 0
+        queue = self._pending_queues.pop(key, None)
+        if queue is not None:
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                dropped += 1
+        return cancelled + sub_cancelled + exec_cancelled + dropped
 
     async def discard_session(self, key: str) -> None:
         """Stop active work for *key* and forget its cached session."""
@@ -968,6 +1004,9 @@ class AgentLoop:
         Returns the complete result produced by ``AgentRunner``.
         """
         self._sync_subagent_runtime_limits()
+
+        # Chat message ids injected mid-turn, for follow-up lifecycle events.
+        injected_ids: list[str] = []
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
             if session is None:
@@ -1059,6 +1098,11 @@ class AgentLoop:
                 followup_id = metadata.get(PENDING_FOLLOWUP_ID_KEY)
                 if isinstance(followup_id, str) and followup_id:
                     row[PENDING_FOLLOWUP_ID_KEY] = followup_id
+                origin_message_id = metadata.get("message_id")
+                if origin_message_id is not None:
+                    origin_id = str(origin_message_id)
+                    injected_ids.append(origin_id)
+                    await events.emit(FollowUpEvent(phase="processing", message_id=origin_id))
                 return row
 
             items: list[dict[str, Any]] = []
@@ -1234,6 +1278,8 @@ class AgentLoop:
             reset_workspace_scope(workspace_token)
             reset_request_context(request_token)
             reset_file_states(file_state_token)
+        for injected_id in injected_ids:
+            await events.emit(FollowUpEvent(phase="done", message_id=injected_id))
         if session is not None and not ephemeral:
             session.provider_state = result.provider_state
         if result.stop_reason == "max_iterations":
@@ -1382,9 +1428,29 @@ class AgentLoop:
                             "Routed follow-up message to pending queue for session {}",
                             effective_key,
                         )
+                        queued_message_id = (pending_msg.metadata or {}).get("message_id")
+                        await self.bus.publish_event(
+                            FollowUpEvent(
+                                phase="queued",
+                                message_id=(
+                                    str(queued_message_id)
+                                    if queued_message_id is not None
+                                    else None
+                                ),
+                            ),
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                        )
                         continue
                 # Compute the effective session key before dispatching
                 # This ensures /stop command can find tasks correctly when unified session is enabled
+                # Pre-register the mid-turn injection queue synchronously so
+                # follow-ups arriving before the task starts (e.g. a burst of
+                # re-published leftovers) divert into this turn instead of
+                # spawning a pile-up of competing lock-waiting tasks.
+                self._pending_queues.setdefault(
+                    effective_key, asyncio.Queue(maxsize=_PENDING_QUEUE_MAXSIZE),
+                )
                 task = asyncio.create_task(self._dispatch(msg))
                 self._track_active_task(effective_key, task)
         finally:
@@ -1419,6 +1485,7 @@ class AgentLoop:
                 logger.info("Skipped stale recovery for session {}", session_key)
                 if recovery_task_registered and current_task is not None:
                     recovery_admission.unregister_recovery_task(session_key, current_task)
+                await self._abandon_dispatch_queue(session_key)
                 return
         lock = self._get_session_lock(session_key)
         gate = self._concurrency_gate or nullcontext()
@@ -1429,9 +1496,14 @@ class AgentLoop:
         try:
             async with lock, gate:
                 # Only the task that owns the session lock may publish the
-                # active mid-turn injection queue for this session.
-                pending = asyncio.Queue(maxsize=20)
-                self._pending_queues[session_key] = pending
+                # active mid-turn injection queue for this session. run()
+                # pre-registers a queue for this dispatch so follow-ups that
+                # arrived before the lock was granted divert here; adopt it
+                # instead of replacing it (replacement would orphan them).
+                pending = self._pending_queues.get(session_key)
+                if pending is None:
+                    pending = asyncio.Queue(maxsize=_PENDING_QUEUE_MAXSIZE)
+                    self._pending_queues[session_key] = pending
                 try:
                     delivery = self.turn_delivery_factory.create(
                         msg,
@@ -1529,6 +1601,10 @@ class AgentLoop:
         except asyncio.CancelledError:
             if not completion_published and normalize_command_text(msg.content).lower() == "/compact":
                 await delivery.complete(None, publish_completion=True)
+            # Cancellation while waiting for the session lock skips the inner
+            # cleanup below; repark any follow-ups diverted into the queue that
+            # was pre-registered for this dispatch.
+            await self._abandon_dispatch_queue(session_key)
             raise
         finally:
             if (
