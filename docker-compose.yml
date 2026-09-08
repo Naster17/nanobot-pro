@@ -6,6 +6,9 @@ x-common-config: &common-config
       NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
   volumes:
     - ~/.nanobot:/home/nanobot/.nanobot
+  # Resolve host services (e.g. freellmapi on host port 3001) via host.docker.internal.
+  extra_hosts:
+    - host.docker.internal:host-gateway
   cap_drop:
     - ALL
   # Entrypoint uses these to fix bind-mount ownership and drop to the nanobot user.
