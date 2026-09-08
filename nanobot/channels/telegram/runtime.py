@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import unicodedata
@@ -193,6 +194,112 @@ def _escape_telegram_html(text: str) -> str:
 def _tool_hint_to_telegram_blockquote(text: str) -> str:
     """Render tool hints as an expandable blockquote (collapsed by default)."""
     return f"<blockquote expandable>{_escape_telegram_html(text)}</blockquote>" if text else ""
+
+
+# Tool detail messages: one message per tool round showing the full call and its
+# result. Long bodies collapse via Telegram's expandable blockquote.
+_TOOL_QUOTE_EXPAND_MIN_CHARS = 180  # shorter bodies render as a plain blockquote
+_TOOL_ARGS_MAX_CHARS = 700
+_TOOL_RESULT_MAX_CHARS = 1500
+_TOOL_DETAIL_HTML_BUDGET = 3900  # keep the whole message safely under 4096
+_TOOL_DETAIL_STATE_MAX = 128  # bound in-flight call_id -> message mappings
+
+
+def _cap_tool_text(text: str, max_chars: int) -> str:
+    """Truncate tool bodies with a note about the hidden remainder."""
+    if len(text) <= max_chars:
+        return text
+    hidden = len(text) - max_chars
+    return f"{text[:max_chars]}\n… (+{hidden} chars)"
+
+
+def _tool_args_text(event: dict[str, Any]) -> str:
+    """Render the call's arguments: the raw command for exec, pretty JSON else."""
+    name = str(event.get("name") or "tool")
+    raw_args = event.get("arguments")
+    args = cast(dict[str, Any], raw_args) if isinstance(raw_args, dict) else {}
+    if name == "exec":
+        command = args.get("command") or args.get("cmd")
+        if isinstance(command, str) and command:
+            return command
+    if not args:
+        return "(no arguments)"
+    try:
+        return json.dumps(args, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(args)
+
+
+def _tool_result_text(event: dict[str, Any]) -> str:
+    """Extract human-readable output from a finished tool event payload."""
+    if event.get("phase") == "error":
+        error = event.get("error")
+        if isinstance(error, str) and error.strip():
+            return error
+        return "Tool execution failed"
+    result = event.get("result")
+    if isinstance(result, str):
+        text = result
+    elif result is None:
+        text = ""
+    else:
+        try:
+            text = json.dumps(result, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = str(result)
+    return text.strip() or "(no output)"
+
+
+def _render_tool_quote(text: str) -> str:
+    """Wrap tool text in a blockquote; long bodies become expandable (collapsed)."""
+    escaped = _escape_telegram_html(text)
+    if len(text) > _TOOL_QUOTE_EXPAND_MIN_CHARS or text.count("\n") >= 3:
+        return f"<blockquote expandable>{escaped}</blockquote>"
+    return f"<blockquote>{escaped}</blockquote>"
+
+
+def _render_tool_call_section(event: dict[str, Any], *, with_result: bool) -> str:
+    """Render one tool call: header, arguments quote, and optionally the result."""
+    name = _escape_telegram_html(str(event.get("name") or "tool"))
+    status = ""
+    if with_result:
+        status = " ✅" if event.get("phase") == "end" else " ❌"
+    parts = [f"🛠 <b>{name}</b>{status}"]
+    args = _cap_tool_text(_tool_args_text(event), _TOOL_ARGS_MAX_CHARS)
+    parts.append(_render_tool_quote(args))
+    if with_result:
+        result = _cap_tool_text(_tool_result_text(event), _TOOL_RESULT_MAX_CHARS)
+        parts.append(_render_tool_quote(result))
+    return "\n".join(parts)
+
+
+def _join_tool_detail_sections(sections: list[str]) -> str:
+    """Join rendered sections into one message, dropping tails on overflow."""
+    html = "\n\n".join(sections)
+    while len(html) > _TOOL_DETAIL_HTML_BUDGET and len(sections) > 1:
+        sections.pop()
+        html = "\n\n".join(sections)
+    return html
+
+
+def _build_tool_detail_html(events: list[dict[str, Any]], *, with_result: bool) -> str:
+    """Join tool call sections into one message, dropping calls if it overflows."""
+    sections = [_render_tool_call_section(event, with_result=with_result) for event in events]
+    html = _join_tool_detail_sections(sections)
+    if len(sections) < len(events):
+        html += f"\n\n… (+{len(events) - len(sections)} more tool calls)"
+    return html
+
+
+def _build_tool_detail_html_from_sections(detail: _ToolDetailMessage) -> str:
+    """Rebuild a round's message from its stored call sections."""
+    return _join_tool_detail_sections([detail.sections[cid] for cid in detail.order])
+
+
+def _strip_telegram_html(html: str) -> str:
+    """Plain-text fallback for tool detail messages when HTML is rejected."""
+    text = re.sub(r"</?(?:b|i|s|u|code|pre|blockquote)[^>]*>", "", html)
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 def _strip_md(s: str) -> str:
@@ -410,6 +517,16 @@ class _QueuedTelegramUpdate:
     sort_key: tuple[int, int]
 
 
+@dataclass
+class _ToolDetailMessage:
+    """Telegram message carrying the detailed view of one tool round."""
+
+    chat_id: int
+    message_id: int
+    sections: dict[str, str]  # call_id -> rendered start-section HTML
+    order: list[str]  # call_ids in display order
+
+
 class TelegramConfig(Base):
     """Telegram channel configuration."""
 
@@ -434,6 +551,9 @@ class TelegramConfig(Base):
     inline_keyboards: bool = False
     # Opt in to Bot API 10.1 sendRichMessage for richer markdown rendering.
     rich_messages: bool = False
+    # Show tool calls in detail: one compact message per tool round carrying the
+    # full arguments and the tool result in (expandable) blockquotes.
+    tool_details: bool = True
     stream_edit_interval: float = Field(default=_STREAM_EDIT_INTERVAL_DEFAULT, ge=0.1)
     webhook_url: str = ""
     webhook_listen_host: str = "127.0.0.1"
@@ -529,6 +649,7 @@ class TelegramChannel(BaseChannel):
         self._bot_username: str | None = None
         self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
         self._compaction_notices: dict[tuple[str, str], int] = {}  # (chat_id, compaction_id) -> message_id
+        self._tool_details: dict[str, _ToolDetailMessage] = {}  # call_id -> tool round message
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -1079,6 +1200,12 @@ class TelegramChannel(BaseChannel):
             )
             return
 
+        # Detailed tool view: the round's start posts the calls, the finish
+        # phase edits that same message to append the results.
+        if progress_event is not None and self.config.tool_details:
+            if await self._send_tool_detail(chat_id, progress_event, reply_params, thread_kwargs):
+                return
+
         # Send media files
         for media_path in (msg.media or []):
             try:
@@ -1288,6 +1415,145 @@ class TelegramChannel(BaseChannel):
                 return
             self.logger.warning("Compaction notice edit failed, sending anew: {}", exc)
             await self._send_text(chat_id, msg.content, thread_kwargs=thread_kwargs)
+
+    @staticmethod
+    def _tool_detail_payloads(event: ProgressEvent) -> list[dict[str, Any]]:
+        """Normalize a progress event's tool payloads, dropping malformed ones."""
+        raw = event.tool_events if isinstance(event.tool_events, list) else []
+        payloads: list[dict[str, Any]] = []
+        for payload in raw:
+            phase = payload.get("phase")
+            if phase not in ("start", "end", "error") or not payload.get("name"):
+                continue
+            payloads.append(payload)
+        return payloads
+
+    async def _send_tool_detail(
+        self,
+        chat_id: int,
+        event: ProgressEvent,
+        reply_params: ReplyParameters | None,
+        thread_kwargs: dict[str, int],
+    ) -> bool:
+        """Render tool progress as one detail message per round.
+
+        Start payloads post the message (full arguments in blockquotes); finish
+        payloads edit that message in place to append the results. Returns
+        True when the event was consumed by this path.
+        """
+        payloads = self._tool_detail_payloads(event)
+        if not payloads:
+            return False
+
+        starts = [item for item in payloads if item.get("phase") == "start"]
+        finishes = [item for item in payloads if item.get("phase") in ("end", "error")]
+        if event.tool_hint and starts:
+            html = _build_tool_detail_html(starts, with_result=False)
+            message_id = await self._send_tool_detail_html(chat_id, html, reply_params, thread_kwargs)
+            if message_id is not None:
+                self._remember_tool_detail(chat_id, message_id, starts)
+            return True
+        if finishes and not event.tool_hint:
+            await self._apply_tool_results(chat_id, finishes, thread_kwargs)
+            return True
+        return False
+
+    def _remember_tool_detail(
+        self,
+        chat_id: int,
+        message_id: int,
+        starts: list[dict[str, Any]],
+    ) -> None:
+        """Map each call of the round to its detail message for later edits."""
+        detail = _ToolDetailMessage(chat_id=chat_id, message_id=message_id, sections={}, order=[])
+        for item in starts:
+            call_id = str(item.get("call_id") or "")
+            if not call_id:
+                continue
+            detail.sections[call_id] = _render_tool_call_section(item, with_result=False)
+            detail.order.append(call_id)
+        if not detail.order:
+            return
+        while len(self._tool_details) >= _TOOL_DETAIL_STATE_MAX:
+            self._tool_details.pop(next(iter(self._tool_details)))
+        for call_id in detail.order:
+            self._tool_details[call_id] = detail
+
+    async def _apply_tool_results(
+        self,
+        chat_id: int,
+        finishes: list[dict[str, Any]],
+        thread_kwargs: dict[str, int],
+    ) -> None:
+        """Fold finished tool results into the round's message via edit."""
+        app = self._require_app()
+        edited: dict[int, str] = {}
+        for item in finishes:
+            call_id = str(item.get("call_id") or "")
+            detail = self._tool_details.get(call_id) if call_id else None
+            if detail is None or detail.chat_id != chat_id:
+                # Start never arrived (restart, dropped event): post standalone.
+                html = _build_tool_detail_html([item], with_result=True)
+                await self._send_tool_detail_html(chat_id, html, None, thread_kwargs)
+                continue
+            detail.sections[call_id] = _render_tool_call_section(item, with_result=True)
+            html = _build_tool_detail_html_from_sections(detail)
+            edited[detail.message_id] = html
+        for message_id, html in edited.items():
+            try:
+                await self._call_with_retry(
+                    app.bot.edit_message_text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=html,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                if self._is_not_modified_error(exc):
+                    continue
+                self.logger.warning("Tool detail edit failed: {}", exc)
+                try:
+                    await self._call_with_retry(
+                        app.bot.edit_message_text,
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=_strip_telegram_html(html),
+                    )
+                except Exception as plain_exc:
+                    self.logger.warning("Tool detail plain edit failed: {}", plain_exc)
+
+    async def _send_tool_detail_html(
+        self,
+        chat_id: int,
+        html: str,
+        reply_params: ReplyParameters | None,
+        thread_kwargs: dict[str, int],
+    ) -> int | None:
+        """Send a tool detail message as HTML, falling back to plain text."""
+        app = self._require_app()
+        try:
+            sent = await self._call_with_retry(
+                app.bot.send_message,
+                chat_id=chat_id,
+                text=html,
+                parse_mode="HTML",
+                reply_parameters=reply_params,
+                **thread_kwargs,
+            )
+            return sent.message_id
+        except Exception as exc:
+            self.logger.warning("Tool detail HTML rejected, sending plain: {}", exc)
+        try:
+            sent = await self._call_with_retry(
+                app.bot.send_message,
+                chat_id=chat_id,
+                text=_strip_telegram_html(html),
+                **thread_kwargs,
+            )
+            return sent.message_id
+        except Exception as exc:
+            self.logger.warning("Tool detail send failed: {}", exc)
+            return None
 
     async def send_delta(
         self,

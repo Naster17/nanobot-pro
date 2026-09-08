@@ -3326,3 +3326,177 @@ async def test_final_response_marks_done_reaction_on_replied_message() -> None:
         for call in channel._app.bot.set_message_reaction.await_args_list
     ]
     assert reactions == [(77, "👍")]
+
+
+# ---------------------------------------------------------------------------
+# Detailed tool view: calls + results in one (expandable) message per round
+# ---------------------------------------------------------------------------
+
+def _tool_payload(phase: str, call_id: str = "c1", name: str = "exec", **extra) -> dict:
+    payload = {
+        "version": 1,
+        "phase": phase,
+        "call_id": call_id,
+        "name": name,
+        "arguments": {"command": "echo hello"},
+        "result": None,
+        "error": None,
+        "files": [],
+        "embeds": [],
+    }
+    payload.update(extra)
+    return payload
+
+
+def _tool_progress(tool_events: list[dict], *, tool_hint: bool = False, content: str = "") -> OutboundMessage:
+    return OutboundMessage(
+        channel="telegram",
+        chat_id="999",
+        content=content,
+        event=ProgressEvent(content=content, tool_hint=tool_hint, tool_events=tool_events),
+    )
+
+
+def _tool_detail_channel(**config_extra) -> TelegramChannel:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"], **config_extra),
+        MessageBus(),
+    )
+    _install_ready_app(channel)
+    channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    channel._app.bot.edit_message_text = AsyncMock()
+    return channel
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_start_posts_full_call_details() -> None:
+    channel = _tool_detail_channel()
+    command = (
+        "cd /home/user/projects/tuya-lamp/scripts && "
+        'python3 -c "import sys; print(sys.argv)" '
+        + " ".join(f"arg{i}" for i in range(40))
+    )
+
+    await channel.send(_tool_progress(
+        [_tool_payload("start", arguments={"command": command})],
+        tool_hint=True,
+        content='$ cd …/scripts && python3 -c "…',
+    ))
+
+    call = channel._app.bot.send_message.await_args
+    assert call.kwargs["parse_mode"] == "HTML"
+    text = call.kwargs["text"]
+    assert "🛠 <b>exec</b>" in text
+    assert command.replace("&&", "&amp;&amp;") in text  # full command, untruncated
+    assert "<blockquote expandable>" in text
+    assert channel._tool_details["c1"].message_id == 7
+    channel._app.bot.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_finish_edits_result_into_message() -> None:
+    channel = _tool_detail_channel()
+    await channel.send(_tool_progress([_tool_payload("start")], tool_hint=True, content="$ echo hello"))
+    output = "\n".join(f"line {i}" for i in range(40))
+
+    await channel.send(_tool_progress([_tool_payload("end", result=f"{output}\nExit code: 0")]))
+
+    channel._app.bot.send_message.assert_awaited_once()  # result edits, never re-sends
+    call = channel._app.bot.edit_message_text.await_args
+    assert call.kwargs["chat_id"] == 999
+    assert call.kwargs["message_id"] == 7
+    assert call.kwargs["parse_mode"] == "HTML"
+    text = call.kwargs["text"]
+    assert "🛠 <b>exec</b> ✅" in text
+    assert "line 39" in text
+    assert "<blockquote expandable>" in text
+    assert channel._tool_details["c1"].message_id == 7
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_short_result_stays_compact() -> None:
+    channel = _tool_detail_channel()
+    await channel.send(_tool_progress([_tool_payload("start")], tool_hint=True, content="$ echo hello"))
+
+    await channel.send(_tool_progress([_tool_payload("end", result="hello\nExit code: 0")]))
+
+    text = channel._app.bot.edit_message_text.await_args.kwargs["text"]
+    assert "🛠 <b>exec</b> ✅" in text
+    assert "<blockquote>hello\nExit code: 0</blockquote>" in text
+    assert "<blockquote expandable>" not in text
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_error_marks_failure() -> None:
+    channel = _tool_detail_channel()
+    await channel.send(_tool_progress([_tool_payload("start")], tool_hint=True, content="$ echo hello"))
+
+    await channel.send(_tool_progress([_tool_payload("error", error="boom")]))
+
+    text = channel._app.bot.edit_message_text.await_args.kwargs["text"]
+    assert "🛠 <b>exec</b> ❌" in text
+    assert "boom" in text
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_finish_without_start_posts_standalone() -> None:
+    channel = _tool_detail_channel()
+
+    await channel.send(_tool_progress([_tool_payload("end", result="done")]))
+
+    channel._app.bot.edit_message_text.assert_not_awaited()
+    call = channel._app.bot.send_message.await_args
+    assert call.kwargs["parse_mode"] == "HTML"
+    assert "✅" in call.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_disabled_keeps_legacy_hint() -> None:
+    channel = _tool_detail_channel(tool_details=False)
+
+    await channel.send(_tool_progress([_tool_payload("start")], tool_hint=True, content="$ echo hello"))
+
+    call = channel._app.bot.send_message.await_args
+    assert call.kwargs["text"] == "<blockquote expandable>$ echo hello</blockquote>"
+    channel._app.bot.edit_message_text.assert_not_awaited()
+    assert channel._tool_details == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_parallel_calls_share_one_message() -> None:
+    channel = _tool_detail_channel()
+    starts = [
+        _tool_payload("start", call_id="c1", arguments={"command": "echo one"}),
+        _tool_payload("start", call_id="c2", name="read_file", arguments={"path": "/tmp/x"}),
+    ]
+
+    await channel.send(_tool_progress(starts, tool_hint=True, content="$ echo one, read /tmp/x"))
+
+    call = channel._app.bot.send_message.await_args
+    text = call.kwargs["text"]
+    assert "🛠 <b>exec</b>" in text
+    assert "🛠 <b>read_file</b>" in text
+    assert channel._tool_details["c1"].message_id == 7
+    assert channel._tool_details["c2"].message_id == 7
+
+    await channel.send(_tool_progress([
+        _tool_payload("end", call_id="c1", result="one\nExit code: 0"),
+        _tool_payload("end", call_id="c2", result="contents"),
+    ]))
+
+    channel._app.bot.edit_message_text.assert_awaited_once()
+    text = channel._app.bot.edit_message_text.await_args.kwargs["text"]
+    assert text.count("✅") == 2
+    assert "<blockquote>one\nExit code: 0</blockquote>" in text
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_oversized_result_is_capped() -> None:
+    channel = _tool_detail_channel()
+    await channel.send(_tool_progress([_tool_payload("start")], tool_hint=True, content="$ echo hello"))
+
+    await channel.send(_tool_progress([_tool_payload("end", result="x" * 5000)]))
+
+    text = channel._app.bot.edit_message_text.await_args.kwargs["text"]
+    assert "(+" in text
+    assert len(text) < 4096
