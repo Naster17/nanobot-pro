@@ -43,7 +43,7 @@
 | Install nanobot with no terminal/config background | [Start Without Technical Background](./docs/start-without-technical-background.md) |
 | Install quickly and get one CLI reply | [Install](#-install) and [Quick Start](#-quick-start) |
 | Open the bundled browser UI | [WebUI](#-webui) |
-| Connect Telegram, Discord, WeChat, Slack, Email, Mattermost, or another chat app | [Chat Apps](./docs/chat-apps.md) |
+| Connect Telegram, Discord, WeChat, Slack, Email, Mattermost, Linear, or another channel | [Chat Apps](./docs/chat-apps.md) |
 | Configure providers, fallback models, Langfuse, MCP, web tools, or security | [Docs](./docs/README.md) and [Configuration](./docs/configuration.md) |
 | Understand or extend the internals | [Architecture](./docs/architecture.md) and [Development](./docs/development.md) |
 | Deploy to the cloud or keep nanobot running as a service | [Deployment](./docs/deployment.md) |
@@ -53,7 +53,7 @@
 nanobot is a self-hosted personal AI agent runtime. It can:
 
 - run in a browser WebUI or terminal
-- connect to Telegram, Discord, Slack, WeChat, Email, Mattermost, and other chat apps
+- connect to Telegram, Discord, Slack, WeChat, Email, Mattermost, Linear, and other channels
 - use tools such as files, shell, web search, web fetch, MCP, cron, image generation, and subagents
 - keep session history and long-term memory through Dream
 - run long-horizon goals and scheduled automations
@@ -63,7 +63,7 @@ nanobot is a self-hosted personal AI agent runtime. It can:
 ## 💡 Why nanobot
 
 - **Persistent workflows**: goals, memory, tools, and chat context survive long-running work.
-- **Chat-native reach**: WebUI, API, Telegram, Feishu, Slack, Discord, Teams, email, and Mattermost.
+- **Chat-native reach**: WebUI, API, Telegram, Feishu, Slack, Discord, Teams, email, Mattermost, and Linear.
 - **Model freedom**: OpenAI-compatible APIs, local LLMs, image generation, search, and fallbacks.
 - **Small core**: readable internals with MCP, memory, deployment, and automation built in.
 - **Own your stack**: inspect, customize, self-host, and extend without a giant platform.
@@ -82,7 +82,7 @@ Pick **one** install method:
 | Stable | installer, `uv`, or pip | the same package tool | one released Python/WebUI/TUI version |
 | Current source | editable Git checkout | `git pull --ff-only` + editable dependency sync | Python, WebUI, and TUI from that checkout |
 
-Prerequisites: Python 3.11 or newer. Git and [Bun](https://bun.sh/) are only needed for a source install. Published packages include the WebUI and fetch a checksummed, version-matched TUI archive—with its licenses, notices, corresponding application source, source offer, and relinking instructions—on first use.
+Prerequisites: Python 3.11 or newer. Git and [Bun](https://bun.sh/) are only needed for a source install. Published packages include the WebUI, and supported platform wheels also include the native TUI. A source-distribution install can fetch a checksummed, version-matched TUI archive—with its licenses, notices, corresponding application source, source offer, and relinking instructions—on first use.
 
 If terminals, API keys, or config files are new to you, use the guided zero-background walkthrough in [Start Without Technical Background](./docs/start-without-technical-background.md) instead of this compact README path.
 
@@ -127,6 +127,12 @@ python -m pip install nanobot-ai
 ```
 
 If pip reports `externally-managed-environment` on macOS or Linux, use the one-command installer, `uv tool install nanobot-ai`, `pipx install nanobot-ai`, or install inside a virtual environment.
+
+Platform wheels include both the WebUI and the native terminal UI: macOS 13+ (Apple Silicon
+and Intel), glibc 2.17+ Linux (ARM64 and x64), and Windows x64. The x64 runtime requires SSE4.2.
+Pip selects the matching wheel; opening the TUI does not need a separate GitHub download or Bun
+installation. A source-distribution install on a supported target can use the matching checksummed
+GitHub release archive. On other platforms, use `nanobot --classic` or the WebUI.
 
 **Install from source**
 
@@ -262,7 +268,7 @@ The screenshots below use example conversations, illustrative token counts, and 
 
 <p align="center">
   <a href="./images/nanobot_webui-source.png">
-    <img src="./images/nanobot_webui.png" alt="nanobot WebUI preview with model, project, Apps, Skills, and Automations controls" width="900">
+    <img src="./images/nanobot_webui.png" alt="nanobot WebUI new-topic screen with the hero composer, workspace access, project, and model controls" width="900">
   </a>
 </p>
 
@@ -306,10 +312,10 @@ Use Apps to connect MCP servers, enable Agent Plugins, and manage local CLI App 
 
 ### Let recurring work run on a schedule
 
-Ask for an automation from the topic that should receive its results. Review the message, schedule, linked chat, and run history in Automations; pause or edit it as your needs change. Local triggers let a script start a saved task on demand.
+Ask for an automation from the topic that should receive its results. Use **Tasks** to review and manage schedules, or **Calendar** to scan completed and upcoming runs by date. Local triggers let a script start a saved task on demand.
 
 <p align="center">
-  <img src="./images/nanobot-automations.png" alt="The Automations view with example recurring tasks, a selected daily brief, its schedule, linked chat, and management controls" width="900">
+  <img src="./images/nanobot-automations.png" alt="The Automations calendar with completed and upcoming recurring tasks arranged by date" width="900">
 </p>
 
 Keep the gateway running for scheduled delivery. [Explore Automations →](./docs/automations.md)
@@ -346,27 +352,26 @@ Browse the [repo docs](./docs/README.md) for the latest features and GitHub deve
 
 ## Releases
 
-**Latest release: [v0.3.0 - The Agency Release](https://github.com/HKUDS/nanobot/releases/tag/v0.3.0)**
+**Latest release: [v0.3.5](https://github.com/HKUDS/nanobot/releases/tag/v0.3.5)**
 
-The Agency Release turns nanobot from a durable workbench into an agent runtime that can coordinate helpers, switch models per session, and carry authorized work through to completion.
+v0.3.5 brings the workbench to the terminal and makes conversations easier to continue across the browser, terminal, and chat apps.
 
-- Consult inline subagents without leaving the current task
-- Switch model presets per session directly from the composer
-- Start from a guided WebUI setup with clearer execution controls
-- Apply configuration changes live across a more reliable provider, channel, and tool runtime
+- Use the native terminal workbench with the same gateway and saved conversations as the WebUI.
+- Arrange up to four browser conversations side by side, mention saved sessions, or open a temporary chat.
+- Inspect per-round context usage and compaction progress, with more durable history and recovery.
+- Discover Skills, connect Apps, and manage scheduled work through expanded WebUI flows.
 
-[Read the v0.3.0 release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.3.0)
+[Read the v0.3.5 release notes and upgrade notes](https://github.com/HKUDS/nanobot/releases/tag/v0.3.5)
 
 ## Recent Updates
 
-- **2026-09-05** 🧠 Visible context-compaction progress in the WebUI, terminal, and chat channels.
-- **2026-09-04** 📊 WebUI context usage and cache reuse shown by conversation round.
-- **2026-08-29** 🖥️ `nanobot` opens the native terminal agent by default.
-- **2026-08-27** 📎 Clipboard image attachments in the native terminal.
-- **2026-08-19** 🔗 Session mentions let agents read and message other saved conversations.
-- **2026-08-12** 🖥️ A WebUI workbench with grouped conversation panes and adjustable layouts.
+- **2026-09-19** 🔎 Searchable provider setup, consistent provider identities, and smoother Linear onboarding.
+- **2026-09-18** ♻️ Clearer recovery for interrupted work and Discord reply-context support.
+- **2026-09-16** 📦 Platform wheels bundle the version-matched native terminal UI.
+- **2026-09-15** 🚀 Released [v0.3.5](https://github.com/HKUDS/nanobot/releases/tag/v0.3.5) with a shared terminal workbench, multi-pane WebUI, and visible context continuity.
+- **2026-09-07** 🔌 WeCom media uploads use the SDK API, and CI skips unrelated jobs.
 
-For older updates, see the [release archive](./docs/release-archive.md) or [GitHub releases](https://github.com/HKUDS/nanobot/releases).
+For earlier updates, see the [release archive](./docs/release-archive.md) or [GitHub releases](https://github.com/HKUDS/nanobot/releases).
 
 ## Open Source Partners
 

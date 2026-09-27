@@ -611,7 +611,7 @@ class ExecTool(Tool):
 
         quote = stripped[0]
         end = stripped.find(quote, 1)
-        if end == -1 or end + 1 >= len(stripped) or not stripped[end + 1].isspace():
+        if end == -1 or (end + 1 < len(stripped) and not stripped[end + 1].isspace()):
             return command
 
         executable = stripped[1:end]
@@ -1156,7 +1156,7 @@ class ExecTool(Tool):
         self,
         workspace_root: Path | None = None,
     ) -> list[Path]:
-        if self.sandbox != "bwrap" or _IS_WINDOWS:
+        if self.sandbox not in ("bwrap", "seatbelt") or _IS_WINDOWS:
             return []
         roots = [*self.sandbox_ro_binds, *self.sandbox_rw_binds]
         if workspace_root is None:

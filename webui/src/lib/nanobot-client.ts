@@ -976,6 +976,7 @@ export class NanobotClient {
       mcpPresets?: OutboundMcpPresetMention[];
       sessionMentions?: SessionMention[];
       quotedContext?: string;
+      intent?: "create_automation";
       workspaceScope?: WorkspaceScopePayload | null;
       turnId?: string;
       /** False for side-channel or injected messages that do not own a lifecycle. */
@@ -995,6 +996,7 @@ export class NanobotClient {
         ? { session_mentions: options.sessionMentions }
         : {}),
       ...(options?.quotedContext?.trim() ? { quoted_context: options.quotedContext.trim() } : {}),
+      ...(options?.intent === "create_automation" ? { intent: options.intent } : {}),
       ...(options?.workspaceScope ? { workspace_scope: options.workspaceScope } : {}),
       ...(options?.turnId ? { turn_id: options.turnId } : {}),
       webui: true,
@@ -1298,6 +1300,10 @@ export class NanobotClient {
       this.pendingInboundByChat.set(chatId, q);
     }
     q.push(ev);
+    // Temporary chats have no canonical history to recover evicted events from.
+    // Like their pinned message snapshots, retain them until resubscribe, close
+    // or disconnect. Disk-backed chats keep the bounded replay tail below.
+    if (this.temporaryChatIds.has(chatId)) return;
     const over = q.length - NanobotClient.PENDING_INBOUND_MAX;
     if (over > 0) {
       q.splice(0, over);

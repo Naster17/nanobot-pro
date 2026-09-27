@@ -591,6 +591,41 @@ class TelegramConfig(Base):
         return self
 
 
+_TELEGRAM_COMMAND_ALIASES = {
+    "/dream_log": "/dream-log",
+    "/dream_restore": "/dream-restore",
+    "/dream_prompt": "/dream-prompt",
+    "/evaluator_prompt": "/evaluator-prompt",
+}
+_TELEGRAM_DISPLAY_COMMAND_RE = re.compile(
+    r"(?<![\w/.-])/(?:dream-log|dream-restore|dream-prompt|evaluator-prompt)(?![\w/.-])"
+)
+
+
+def _telegram_command_text(text: str) -> str:
+    """Render command references for Telegram without changing fenced code or diffs."""
+    display_names = {value: key for key, value in _TELEGRAM_COMMAND_ALIASES.items()}
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+        elif stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+        else:
+            line = _TELEGRAM_DISPLAY_COMMAND_RE.sub(lambda match: display_names[match[0]], line)
+            # Inline code is not tappable as a Telegram command.
+            line = re.sub(
+                r"`(/(?:dream_log|dream_restore|dream_prompt|evaluator_prompt)(?: [^`\n]*)?)`",
+                r"\1",
+                line,
+            )
+        lines.append(line)
+    return "".join(lines)
+
+
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling or webhook mode.
@@ -620,18 +655,16 @@ class TelegramChannel(BaseChannel):
         BotCommand("dream_log", "Show the latest Dream memory change"),
         BotCommand("dream_restore", "Restore Dream memory to an earlier version"),
         BotCommand("dream_prompt", "Tell Dream how to organize memory"),
+        BotCommand("evaluator_prompt", "Customize the heartbeat evaluator prompt"),
         BotCommand("help", "Show available commands"),
     ]
 
     # Regex for slash commands routed to AgentLoop via ``_forward_command``.
-    # Command names use underscores because Telegram only accepts ``[a-z0-9_]``
-    # names as commands. Legacy hyphenated spellings stay on a separate handler
-    # (below). Must cover every builtin router command;
-    # ``test_telegram_bus_slash_command_regex_matches_agent_loop_commands``
-    # pins the pairing.
+    # Telegram-safe aliases are normalized before reaching the core router.
+    # Canonical hyphenated commands stay on a separate handler (below).
     TELEGRAM_BUS_SLASH_COMMAND_RE = re.compile(
         r"^/(?:new|compact|stop|restart|status|dream|history|goal|trigger|pairing|model|skill"
-        r"|dream_log|dream_restore|dream_prompt|evaluator_prompt)(?:@\w+)?(?:\s+.*)?$"
+        r"|dream_log|dream_restore|dream_prompt|evaluator_prompt|evaluator-prompt)(?:@\w+)?(?:\s+.*)?$"
     )
 
     @classmethod
@@ -686,17 +719,12 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     def _normalize_telegram_command(content: str) -> str:
-        """Map legacy hyphenated command spellings to canonical underscore names."""
+        """Map Telegram-safe command aliases back to canonical nanobot commands."""
         if not content.startswith("/"):
             return content
-        if content == "/dream-log" or content.startswith("/dream-log "):
-            return content.replace("/dream-log", "/dream_log", 1)
-        if content == "/dream-restore" or content.startswith("/dream-restore "):
-            return content.replace("/dream-restore", "/dream_restore", 1)
-        if content == "/dream-prompt" or content.startswith("/dream-prompt "):
-            return content.replace("/dream-prompt", "/dream_prompt", 1)
-        if content == "/evaluator-prompt" or content.startswith("/evaluator-prompt "):
-            return content.replace("/evaluator-prompt", "/evaluator_prompt", 1)
+        for alias, canonical in _TELEGRAM_COMMAND_ALIASES.items():
+            if content == alias or content.startswith(f"{alias} "):
+                return canonical + content[len(alias):]
         return content
 
     async def start(self) -> None:
@@ -758,6 +786,8 @@ class TelegramChannel(BaseChannel):
     async def _start_app(self) -> None:
         """Build, initialize and start the Telegram application."""
         proxy = self.config.proxy or None
+        if proxy and "://" not in proxy:
+            proxy = f"http://{proxy}"
 
         # Separate pools so long-polling (getUpdates) never starves outbound sends.
         api_request = HTTPXRequest(
@@ -1273,6 +1303,8 @@ class TelegramChannel(BaseChannel):
             buttons = cast(list[list[str]], getattr(msg, "buttons", None) or [])
             reply_markup = self._build_keyboard(buttons) if buttons else None
             text = msg.content
+            if msg.metadata.get("render_as") == "text":
+                text = _telegram_command_text(text)
             # Fallback: no native keyboard → splice labels into the message so the choices survive.
             if buttons and reply_markup is None:
                 text = f"{text}\n\n{self._buttons_as_text(buttons)}"
@@ -1887,7 +1919,7 @@ class TelegramChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             await self._send_pairing_code_if_private(sender_id, update.message, user)
             return
-        await update.message.reply_text(build_help_text())
+        await update.message.reply_text(_telegram_command_text(build_help_text()))
 
     @staticmethod
     def _sender_id(user: User) -> str:

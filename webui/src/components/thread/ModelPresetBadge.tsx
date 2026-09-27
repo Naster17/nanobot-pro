@@ -92,7 +92,6 @@ interface ModelPresetBadgeProps {
   providerLabel?: string | null;
   needsSetup?: boolean;
   attentionRequest?: number;
-  fallbackModelName?: string | null;
   isHero: boolean;
   onClick?: () => void;
 }
@@ -109,7 +108,6 @@ export function ModelPresetBadge({
   providerLabel,
   needsSetup = false,
   attentionRequest = 0,
-  fallbackModelName,
   isHero,
   onClick,
 }: ModelPresetBadgeProps) {
@@ -128,22 +126,10 @@ export function ModelPresetBadge({
     model: modelDetail ?? modelPresets[listedIndex]?.model,
     provider: provider || modelPresets[listedIndex]?.provider,
   };
-  const fallbackPreset = fallbackModelName
-    ? modelPresets.find((preset) => preset.model?.trim() === fallbackModelName.trim())
-    : undefined;
-  const fallbackDisplayLabel = fallbackPreset?.name
-    || fallbackModelName?.trim().split(/[/:]/).pop()
-    || null;
-  const displayLabel = fallbackDisplayLabel || label;
-  const displayModelDetail = fallbackPreset
-    ? fallbackPreset.model
-    : fallbackModelName || modelDetail;
-  const displayProvider = fallbackPreset?.provider
-    || (fallbackModelName ? inferProviderFromModelName(fallbackModelName) : provider);
-  const tooltipLabel = [...new Set([
-    displayLabel,
-    displayModelDetail,
-    fallbackModelName ? null : providerLabel,
+  const tooltipLabel = needsSetup ? label : [...new Set([
+    label,
+    modelDetail,
+    providerLabel,
   ].filter(Boolean))].join(" · ");
   const presets = !activeName
     ? modelPresets
@@ -280,12 +266,11 @@ export function ModelPresetBadge({
   const pill = (
     <PresetPill
       key={needsSetup ? attentionRequest : undefined}
-      label={displayLabel}
-      modelDetail={displayModelDetail}
-      provider={displayProvider}
+      label={label}
+      modelDetail={modelDetail}
+      provider={provider}
       needsSetup={needsSetup}
       needsAttention={needsSetup && attentionRequest > 0}
-      fallbackModelName={fallbackModelName}
       isHero={isHero}
     />
   );
@@ -294,7 +279,7 @@ export function ModelPresetBadge({
   const badge = !canSwitch ? (
     <TooltipTrigger asChild>
       <Container
-        aria-label={displayLabel}
+        aria-label={label}
         tabIndex={opensSetup ? undefined : 0}
         type={opensSetup ? "button" : undefined}
         onClick={opensSetup ? onClick : undefined}
@@ -320,7 +305,7 @@ export function ModelPresetBadge({
           <button
             type="button"
             data-switching={motion ? "true" : undefined}
-            aria-label={displayLabel}
+            aria-label={label}
             aria-expanded={open}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -454,7 +439,7 @@ export function ModelPresetBadge({
   );
 
   return (
-    <TooltipProvider delayDuration={300} skipDelayDuration={80}>
+    <TooltipProvider>
       <Tooltip open={tooltipOpen && !open && !motion} onOpenChange={setTooltipOpen}>
         {badge}
         <TooltipContent side="top">{tooltipLabel}</TooltipContent>
@@ -483,7 +468,7 @@ function PresetOption({
       className={cn(
         floatingItemClassName,
         floatingItemFocusClassName,
-        "flex min-h-9 w-full cursor-pointer gap-2.5 px-2.5 py-1.5 text-left hover:bg-muted/55",
+        "flex min-h-9 w-full cursor-pointer gap-2.5 px-2.5 py-1.5 text-left hover:bg-muted/55 max-sm:min-h-11",
         selected && "bg-muted/55 text-foreground",
       )}
     >
@@ -493,8 +478,8 @@ function PresetOption({
         provider={preset.provider}
         isHero={false}
       />
-      <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden whitespace-nowrap">
-        <span className="shrink-0 text-[13px] font-medium text-foreground">{preset.name}</span>
+      <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden whitespace-nowrap max-sm:flex-col max-sm:items-start max-sm:gap-0.5 max-sm:whitespace-normal">
+        <span className="shrink-0 text-[13px] font-medium text-foreground max-sm:max-w-full max-sm:break-words">{preset.name}</span>
         {detail && detail !== preset.name ? (
           <span className="truncate text-[12px] text-muted-foreground">{detail}</span>
         ) : null}
@@ -510,7 +495,6 @@ function PresetPill({
   provider,
   needsSetup = false,
   needsAttention = false,
-  fallbackModelName,
   isHero,
   offset,
   scale,
@@ -520,7 +504,6 @@ function PresetPill({
   provider?: string | null;
   needsSetup?: boolean;
   needsAttention?: boolean;
-  fallbackModelName?: string | null;
   isHero: boolean;
   offset?: number;
   scale?: number;
@@ -543,7 +526,6 @@ function PresetPill({
 
   return (
     <span
-      data-fallback={fallbackModelName ? "true" : undefined}
       data-needs-setup={needsSetup ? "true" : undefined}
       data-preset-offset={offset}
       className={cn(
@@ -602,7 +584,7 @@ function SetupPromptLabel({ label }: { label: string }) {
   );
 }
 
-function PresetProviderIcon({
+export function PresetProviderIcon({
   label,
   modelDetail,
   provider,
@@ -617,13 +599,15 @@ function PresetProviderIcon({
 }) {
   const inferredProvider = provider || inferProviderFromModelName(modelDetail || label);
   const brand = providerBrand(inferredProvider);
-  const { logoUrl, onLogoError, onLogoLoad } = useLogoFallback(brand?.logoUrls);
+  const { logoUrl, logoLoaded, onLogoError, onLogoLoad } = useLogoFallback(brand?.logoUrls);
+  const isLogoTile = brand?.logoLayout === "tile" && logoUrl === brand.logoUrl;
   return (
     <span
       data-testid={testId}
       className={cn(
-        "grid shrink-0 place-items-center",
+        "grid shrink-0 place-items-center overflow-hidden rounded-[5px]",
         isHero ? "h-4 w-4" : "h-[18px] w-[18px]",
+        logoUrl && (logoLoaded ? (isLogoTile ? "bg-transparent" : "bg-white") : "bg-muted"),
       )}
       aria-hidden
     >
@@ -634,7 +618,12 @@ function PresetProviderIcon({
           draggable={false}
           decoding="async"
           loading="lazy"
-          className={cn("object-contain", isHero ? "h-3.5 w-3.5" : "h-[18px] w-[18px]")}
+          referrerPolicy="no-referrer"
+          className={cn(
+            "object-contain",
+            isLogoTile ? "h-full w-full" : "h-3.5 w-3.5",
+            logoLoaded ? "opacity-100" : "opacity-0",
+          )}
           onLoad={onLogoLoad}
           onError={onLogoError}
         />

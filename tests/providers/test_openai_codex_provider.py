@@ -211,7 +211,10 @@ async def test_codex_request_honors_stream_idle_timeout_env(monkeypatch) -> None
     seen: dict[str, int] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request)
+        return httpx.Response(
+            200, request=request,
+            text='data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        )
 
     def fake_client(
         *,
@@ -236,7 +239,10 @@ async def test_codex_request_uses_configured_proxy(monkeypatch) -> None:
     proxy = "http://127.0.0.1:23458"
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request)
+        return httpx.Response(
+            200, request=request,
+            text='data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        )
 
     def fake_client(
         *,
@@ -512,7 +518,8 @@ async def test_codex_diagnostic_log_omits_prompt_content(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_retry_uses_structured_timeout_metadata(monkeypatch) -> None:
+@pytest.mark.parametrize("error", [httpx.ReadTimeout(""), ConnectionError("stream ended early")])
+async def test_codex_retry_uses_structured_transient_error_metadata(monkeypatch, error) -> None:
     calls = 0
     delays: list[float] = []
 
@@ -522,7 +529,7 @@ async def test_codex_retry_uses_structured_timeout_metadata(monkeypatch) -> None
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise httpx.ReadTimeout("")
+            raise error
         return provider_base.LLMResponse(content="ok")
 
     async def fake_sleep(delay: float) -> None:
@@ -991,3 +998,29 @@ async def test_codex_stream_surfaces_reasoning_summary(monkeypatch) -> None:
 
 async def _append(target: list[str], value: str) -> None:
     target.append(value)
+
+
+async def test_codex_request_preserves_optional_tool_fields(monkeypatch):
+    _mock_codex_token(monkeypatch)
+    captured = {}
+
+    async def fake_request(_url, _headers, body, **_kwargs):
+        captured.update(body)
+        return provider_base.LLMResponse(content="ok")
+
+    monkeypatch.setattr("nanobot.providers.openai_codex_provider._request_codex", fake_request)
+    parameters = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": [],
+    }
+    response = await OpenAICodexProvider().chat(
+        [{"role": "user", "content": "Search issues"}],
+        tools=[{"type": "function", "function": {
+            "name": "list_issues", "parameters": parameters,
+        }}],
+    )
+
+    assert response.content == "ok"
+    assert captured["tools"][0]["strict"] is False
+    assert captured["tools"][0]["parameters"] == parameters

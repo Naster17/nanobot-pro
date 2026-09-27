@@ -10,9 +10,12 @@ export type ActivityStepTone = "neutral" | "active" | "success" | "error";
 export interface ActivityStepProps {
   icon?: LucideIcon;
   marker?: ReactNode;
+  showMarker?: boolean;
   label: ReactNode;
+  tooltipContent?: ReactNode;
   ariaLabel?: string;
   active?: boolean;
+  animateLabel?: boolean;
   tone?: ActivityStepTone;
   className?: string;
   contentClassName?: string;
@@ -24,9 +27,12 @@ export interface ActivityStepProps {
 export function ActivityStep({
   icon: Icon,
   marker,
+  showMarker = true,
   label,
+  tooltipContent,
   ariaLabel,
   active = false,
+  animateLabel = true,
   tone = active ? "active" : "neutral",
   className,
   contentClassName,
@@ -41,7 +47,7 @@ export function ActivityStep({
       className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap"
     >
       <StreamingLabelSheen
-        active={active}
+        active={active && animateLabel}
         className={cn(
           "min-w-0 flex-1 truncate font-medium",
           tone === "error" ? "text-destructive/78" : "text-muted-foreground/85",
@@ -58,39 +64,42 @@ export function ActivityStep({
       data-testid="activity-step"
       aria-label={ariaLabel}
       className={cn(
-        "relative grid min-w-0 grid-cols-[1.125rem_minmax(0,1fr)] gap-2 py-0.5 text-[13px] leading-5",
+        "relative grid min-w-0 py-0.5 text-[13px] leading-5",
+        showMarker ? "grid-cols-[1.125rem_minmax(0,1fr)] gap-2" : "grid-cols-1",
         className,
       )}
       style={style}
     >
-      <span
-        className={cn(
-          "flex h-5 w-[1.125rem] shrink-0 items-start justify-center pt-[3px]",
-        )}
-        aria-hidden
-      >
-        {marker ?? (
-          <span
-            className={cn(
-              "grid h-3.5 w-3.5 place-items-center rounded-full border bg-background transition-colors",
-              tone === "active" && "border-muted-foreground/28 text-muted-foreground/72",
-              tone === "success" && "border-emerald-500/28 text-emerald-500/78",
-              tone === "error" && "border-destructive/30 text-destructive/78",
-              tone === "neutral" && "border-muted-foreground/18 text-muted-foreground/50",
-              markerClassName,
-            )}
-          >
-            {Icon ? <Icon className="h-2.5 w-2.5" strokeWidth={2.15} /> : null}
-          </span>
-        )}
-      </span>
+      {showMarker ? (
+        <span
+          className={cn(
+            "flex h-5 w-[1.125rem] shrink-0 items-start justify-center pt-[3px]",
+          )}
+          aria-hidden
+        >
+          {marker ?? (
+            <span
+              className={cn(
+                "grid h-3.5 w-3.5 place-items-center rounded-full border bg-background transition-colors",
+                tone === "active" && "border-muted-foreground/28 text-muted-foreground/72",
+                tone === "success" && "border-emerald-500/28 text-emerald-500/78",
+                tone === "error" && "border-destructive/30 text-destructive/78",
+                tone === "neutral" && "border-muted-foreground/18 text-muted-foreground/50",
+                markerClassName,
+              )}
+            >
+              {Icon ? <Icon className="h-2.5 w-2.5" strokeWidth={2.15} /> : null}
+            </span>
+          )}
+        </span>
+      ) : null}
       <div className={cn("min-w-0", contentClassName)}>
         {typeof label === "string" ? (
-          <TooltipProvider delayDuration={300} skipDelayDuration={80}>
+          <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>{line}</TooltipTrigger>
               <TooltipContent side="top" className="max-w-[min(32rem,calc(100vw-2rem))] whitespace-pre-wrap break-words">
-                {label}
+                {tooltipContent ?? label}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>

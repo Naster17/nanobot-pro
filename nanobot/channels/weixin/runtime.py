@@ -37,6 +37,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
+from nanobot.utils.logging_bridge import redirect_lib_logging
 
 # ---------------------------------------------------------------------------
 # Protocol constants (from openclaw-weixin types.ts)
@@ -423,7 +424,7 @@ class WeixinChannel(BaseChannel):
                 self.config.base_url = base_url
             return bool(self._token)
         except Exception:
-            self.logger.error("Failed to load Weixin account state", exc_info=True)
+            self.logger.opt(exception=True).error("Failed to load Weixin account state")
             return False
 
     def _save_state(self, *, force: bool = False) -> None:
@@ -996,6 +997,7 @@ class WeixinChannel(BaseChannel):
                 self._client = None
 
     async def start(self) -> None:
+        redirect_lib_logging("httpx", level="WARNING")
         self._running = True
         self._next_poll_timeout_s = self.config.poll_timeout
         self._client = self._new_http_client(

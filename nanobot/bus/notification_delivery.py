@@ -14,6 +14,7 @@ from nanobot.events import (
     ContextCompactionEvent,
     FollowUpEvent,
     RecoveryStateEvent,
+    ResponseSourceEvent,
     RetryWaitEvent,
 )
 
@@ -29,6 +30,7 @@ NOTIFICATION_AUDIENCES: dict[type[AgentEvent], NotificationAudience] = {
     RetryWaitEvent: "lifecycle",
     RecoveryStateEvent: "interactive",
     RetryStatusEvent: "interactive",
+    ResponseSourceEvent: "interactive",
 }
 
 
